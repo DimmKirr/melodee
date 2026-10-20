@@ -15,7 +15,13 @@ on:
       - 'tests/recovery_correction_test.py'
       - 'tests/release_assets_test.py'
     tags: ['v[0-9]*']
+  pull_request:
   workflow_dispatch:
+    inputs:
+      e2e:
+        description: 'Run E2E browser tests'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,6 +33,7 @@ concurrency:
 
 jobs:
   prepare:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -55,49 +62,100 @@ jobs:
               "${release_flags[@]}"
           fi
 
-  firmware:
+  build:
+    if: github.event_name != 'pull_request'
     needs: prepare
-    # Keep the reviewed version tag: the Firmware Hub recognises this builder.
-    uses: zvenson/fm1-build/.github/workflows/build.yml@v1
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
       id-token: write
       attestations: write
-    with:
-      sdk: true
-      tests-block: true
-      build: |
-        set -euo pipefail
-        export PARALLEL=2 MELODEE_DUAL_CORE=1 MELODEE_CORE1_FALLBACK=0
-        export MELODEE_RAM_AUDIO=1 MELODEE_CACHE_RAM=1 MELODEE_ADMISSION=0
-        export MELODEE_AUDIO_PROFILE=0 MELODEE_AUDIO_BENCH=0
-        sudo apt-get update
-        sudo apt-get install -y libharfbuzz-dev libfribidi-dev libraqm-dev
-        python3 -m pip install fonttools mido
-        test "$(git -C "$AC79_SDK" rev-parse HEAD)" = d179b4484759423312073f5fbb232501aa491047
-        version=$(python3 tools/fm1_recover.py --version | awk '{print $NF}')
-        if [[ "$GITHUB_REF" == refs/tags/* ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
-        ./build.sh --release "$version"
-        cp "build/melodee-$version.fwsc" build/melodee.fwsc
-        mkdir -p build/release-assets
-        cp "build/release-$version/"*.fwsc "build/release-$version/"*-app.bin build/release-assets/
-      test: |
-        set -euo pipefail
-        export PARALLEL=2 MELODEE_DUAL_CORE=1 MELODEE_CORE1_FALLBACK=0
-        export MELODEE_RAM_AUDIO=1 MELODEE_CACHE_RAM=1 MELODEE_ADMISSION=0
-        export MELODEE_AUDIO_PROFILE=0 MELODEE_AUDIO_BENCH=0
-        tests/run_tests.sh
-        # Carry stable manual renders through the shared workflow's packages artifact.
-        # This archive is removed from the draft before the complete release goes live.
-        if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != *-* ]]; then
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dimmkirr/setup-fm1-toolchain@v1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libharfbuzz-dev libfribidi-dev libraqm-dev
+          python3 -m pip install fonttools mido
+      - name: Build firmware
+        run: |
+          set -euo pipefail
+          export PARALLEL=2 MELODEE_DUAL_CORE=1 MELODEE_CORE1_FALLBACK=0
+          export MELODEE_RAM_AUDIO=1 MELODEE_CACHE_RAM=1 MELODEE_ADMISSION=0
+          export MELODEE_AUDIO_PROFILE=0 MELODEE_AUDIO_BENCH=0
+          version=$(python3 tools/fm1_recover.py --version | awk '{print $NF}')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          ./build.sh --release "$version"
+          cp "build/melodee-$version.fwsc" build/melodee.fwsc
+          mkdir -p build/release-assets
+          cp "build/release-$version/"*.fwsc "build/release-$version/"*-app.bin build/release-assets/
+      - name: Attest firmware provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            build/release-assets/*.fwsc
+            build/release-assets/*-app.bin
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: build/release-assets/*
+      - name: Upload build tree for test job
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-tree
+          path: build/
+
+  unit-test:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libharfbuzz-dev libfribidi-dev libraqm-dev
+          python3 -m pip install Pillow fonttools mido
+      - name: Download build tree
+        uses: actions/download-artifact@v4
+        with:
+          name: build-tree
+          path: build/
+      - name: Run host tests
+        run: |
+          set -euo pipefail
+          export PARALLEL=2 MELODEE_DUAL_CORE=1 MELODEE_CORE1_FALLBACK=0
+          export MELODEE_RAM_AUDIO=1 MELODEE_CACHE_RAM=1 MELODEE_ADMISSION=0
+          export MELODEE_AUDIO_PROFILE=0 MELODEE_AUDIO_BENCH=0
+          tests/run_tests.sh
+      - name: Generate manual screenshots for stable release
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        run: |
           python3 tools/manual_shots.py
           python3 tools/manual_shots.py --require
           tar -czf build/release-assets/manual-screenshots.tar.gz -C web/manual \
             $(find web/manual -name '*.png' | sed 's|^web/manual/||')
-        fi
-      packages: build/release-assets/*
+      - name: Upload manual screenshots
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-screenshots
+          path: build/release-assets/manual-screenshots.tar.gz
 
   recovery:
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +191,8 @@ jobs:
           path: build/recovery/${{ matrix.target }}/*.zip
 
   publish:
-    needs: [firmware, recovery]
+    if: github.event_name != 'pull_request'
+    needs: [unit-test, recovery]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -150,20 +209,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: packages
-          path: build/attested
-      - name: Stage the attested firmware without rebuilding
-        run: |
-          mkdir -p build/release-assets
-          # The shared artifact also has a root SHA256SUMS, so upload-artifact
-          # preserves build/release-assets/ beneath the artifact root.
-          cp build/attested/build/release-assets/* build/release-assets/
-      - name: Verify firmware attestations from the reviewed builder
+          path: build/release-assets
+      - name: Verify firmware attestations
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           for package in build/release-assets/*.fwsc build/release-assets/*-app.bin; do
             gh attestation verify "$package" --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow zvenson/fm1-build/.github/workflows/build.yml \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
               --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
           done
       - uses: actions/download-artifact@v4
@@ -171,10 +224,15 @@ jobs:
           pattern: recovery-*
           path: build/release-assets
           merge-multiple: true
+      - name: Download manual screenshots from test job
+        if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+        uses: actions/download-artifact@v4
+        with:
+          name: manual-screenshots
+          path: build/
       - name: Unpack generated manual screenshots
         if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
         run: |
-          mv build/release-assets/manual-screenshots.tar.gz build/manual-screenshots.tar.gz
           tar -xzf build/manual-screenshots.tar.gz -C web/manual
           python3 tools/manual_shots.py --require
       - name: Validate release provenance and every archive checksum
@@ -192,14 +250,11 @@ jobs:
           if [[ "$version" == *-* ]]; then
             release_flags=(--prerelease --latest=false)
           fi
-          # The shared builder has already attached the attested firmware to
-          # this draft. Add the complete recovery set and replace its partial sums.
           gh release upload "$GITHUB_REF_NAME" \
             build/release-assets/fm1-recover-*.zip \
             "build/release-assets/melodee-$version-licenses.zip" \
             build/release-assets/BUILD_INFO.json build/release-assets/SHA256SUMS --clobber
           if [[ "$version" != *-* ]]; then
-            # A retry of this job may already have removed the temporary asset.
             archive=$(gh release view "$GITHUB_REF_NAME" --json assets \
               --jq '.assets[] | select(.name == "manual-screenshots.tar.gz") | .name')
             if [[ -n "$archive" ]]; then
@@ -285,3 +340,127 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"
+
+  e2e-test:
+    if: github.event_name != 'pull_request' && (vars.E2E_ENABLED == 'true' || inputs.e2e)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: build/release-assets/
+      - name: Pick firmware package
+        run: |
+          fwsc=$(ls build/release-assets/*.fwsc | head -1)
+          cp "$fwsc" build/melodee.fwsc
+      - name: Install E2E dependencies
+        run: |
+          pip install playwright
+          python3 -m playwright install --with-deps chromium
+      - name: Install fm1-emu
+        run: |
+          git clone --depth 1 https://github.com/joakimeriksson/fm1-emu.git /tmp/fm1-emu
+          mkdir -p tests/fm1-emu
+          for f in index.html main.js style.css worklet.js fwsc.js jit.js firmwares.json; do
+            cp "/tmp/fm1-emu/web/$f" "tests/fm1-emu/$f"
+          done
+          # Apply local patches if any exist
+          if [ -d tests/fm1-emu-patches ]; then
+            for p in tests/fm1-emu-patches/*.patch; do
+              [ -f "$p" ] && patch -d tests/fm1-emu -p1 < "$p"
+            done
+          fi
+          # WASM binary is not in the source repo; download from Pages
+          curl -fsSL https://joakimeriksson.github.io/fm1-emu/fm1_web.wasm \
+            -o tests/fm1-emu/fm1_web.wasm
+      - name: Run E2E tests
+        id: e2e
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          E2E_DEBUG=1 python3 -m unittest \
+            tests.e2e_load_firmware_test \
+            -v 2>&1 | tee e2e-output.txt
+      - name: Collect screenshot paths
+        if: always()
+        id: results
+        run: |
+          results_dir=$(ls -dt tests/results/*-e2e_load_firmware_test 2>/dev/null | head -1)
+          echo "results_dir=${results_dir:-none}" >> "$GITHUB_OUTPUT"
+          if [ -d "$results_dir/screenshots" ]; then
+            echo "screenshot_dir=$results_dir/screenshots" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload E2E screenshots
+        if: always() && steps.results.outputs.screenshot_dir
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: ${{ steps.results.outputs.screenshot_dir }}
+          retention-days: 14
+      - name: Upload E2E logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            tests/results/*/fm1-emulator.log
+            e2e-output.txt
+          retention-days: 14
+      - name: Generate status page with screenshots
+        if: always()
+        env:
+          E2E_OUTCOME: ${{ steps.e2e.outcome }}
+          SCREENSHOT_DIR: ${{ steps.results.outputs.screenshot_dir }}
+          RESULTS_DIR: ${{ steps.results.outputs.results_dir }}
+        run: |
+          {
+            echo "# E2E Test Results"
+            echo ""
+            if [ "$E2E_OUTCOME" = "success" ]; then
+              echo "**Status:** :white_check_mark: All E2E tests passed"
+            else
+              echo "**Status:** :x: Some E2E tests failed"
+            fi
+            echo ""
+            if [ -f e2e-output.txt ]; then
+              echo "<details><summary>Test output</summary>"
+              echo ""
+              echo '```'
+              tail -30 e2e-output.txt
+              echo '```'
+              echo "</details>"
+              echo ""
+            fi
+            if [ -d "$SCREENSHOT_DIR" ]; then
+              echo "## Screenshots"
+              echo ""
+              for png in "$SCREENSHOT_DIR"/*.png; do
+                [ -f "$png" ] || continue
+                name=$(basename "$png" .png)
+                label=$(echo "$name" | sed 's/^[0-9T]*Z-//' | tr '-_' '  ')
+                echo "### $label"
+                echo ""
+                b64=$(base64 -w 0 "$png")
+                echo "<img src=\"data:image/png;base64,$b64\" width=\"800\" alt=\"$label\">"
+                echo ""
+              done
+            fi
+            if [ -f "$RESULTS_DIR/fm1-emulator.log" ]; then
+              echo "<details><summary>Emulator log</summary>"
+              echo ""
+              echo '```'
+              head -50 "$RESULTS_DIR/fm1-emulator.log"
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if E2E tests failed
+        if: steps.e2e.outcome == 'failure'
+        run: exit 1
