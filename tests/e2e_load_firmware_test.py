@@ -45,10 +45,19 @@ class LoadMelodeeFirmwareTest(E2ETestCase):
             page.wait_for_load_state('networkidle', timeout=30_000)
             page.set_input_files('#open', str(FWSC_PATH))
             page.click('#start')
-            page.wait_for_function(
-                f'() => document.getElementById("status")'
-                f'?.textContent?.includes("{BOOT_PATTERN}")',
-                timeout=60_000)
+            try:
+                page.wait_for_function(
+                    f'() => document.getElementById("status")'
+                    f'?.textContent?.includes("{BOOT_PATTERN}")',
+                    timeout=60_000)
+            except Exception:
+                status = page.text_content('#status') or '(empty)'
+                print(f'\n=== Boot failed. #status: {status}', flush=True)
+                print(f'=== Console ({len(page._console_logs)} msgs):',
+                      flush=True)
+                for msg in page._console_logs[-20:]:
+                    print(f'  {msg}', flush=True)
+                raise
             page.wait_for_timeout(1500)
             self.__class__._emu_page = page
         return self.__class__._emu_page

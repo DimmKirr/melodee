@@ -87,7 +87,10 @@ class E2ETestCase(unittest.TestCase):
         else:
             cls.emu_url = EMU_LIVE_URL
         cls._pw = sync_playwright().start()
-        launch_kwargs = dict(headless=True)
+        launch_kwargs = dict(
+            headless=True,
+            args=['--autoplay-policy=no-user-gesture-required'],
+        )
         if CHROMIUM_PATH and os.path.isfile(CHROMIUM_PATH):
             launch_kwargs['executable_path'] = CHROMIUM_PATH
         cls._browser = cls._pw.chromium.launch(**launch_kwargs)

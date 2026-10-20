@@ -384,6 +384,7 @@ jobs:
         id: e2e
         continue-on-error: true
         run: |
+          set -o pipefail
           E2E_DEBUG=1 python3 -m unittest \
             tests.e2e_load_firmware_test \
             -v 2>&1 | tee e2e-output.txt
