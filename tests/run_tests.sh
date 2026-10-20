@@ -179,6 +179,11 @@ web_tests() {                                     # the editor mock's tables mus
     else
         echo "== skip web tests (no node)"
     fi
+    if python3 -c "import patchright" 2>/dev/null || python3 -c "import playwright" 2>/dev/null; then
+        step "E2E: load firmware and verify version" python3 -m unittest tests.e2e_load_firmware_test -v
+    else
+        echo "== skip E2E browser tests (no patchright/playwright: pip install playwright)"
+    fi
 }
 desc_json() { "$OUT/descdump" > "$OUT/desc.json"; }
 old_to_new() {                                    # a package of another app (this one cut short) -> this build

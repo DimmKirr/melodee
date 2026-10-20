@@ -1,4 +1,5 @@
 build/
+.toolchain/
 .DS_Store
 __pycache__/
 fm1-recovery-backups/
@@ -10,3 +11,9 @@ fm1-recovery-backups/
 # Manual figures are rendered from the host UI (tools/manual_shots.py).
 web/manual/*.png
 !/AGENTS.md
+
+# E2E test results (screenshots, debug artifacts)
+tests/results/
+
+# Vendored fm1-emu emulator (WASM binary + debug build)
+tests/fm1-emu/
